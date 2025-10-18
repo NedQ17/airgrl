@@ -31,17 +31,17 @@ SUBSCRIPTION_PRICE_STARS = 1     # Цена подписки в Stars за 30 д
 # --- ПЕРЕМЕННЫЕ ДЛЯ РАЗОВОЙ ПОКУПКИ ---
 MESSAGE_PACKAGES = {
     "package_20": {"count": 20, "price": 1},
-    "package_50": {"count": 50, "price": 3},
-    "package_100": {"count": 100, "price": 10},
-    "package_200": {"count": 200, "price": 15},
-    "package_500": {"count": 500, "price": 30},
+    "package_50": {"count": 50, "price": 1},
+    "package_100": {"count": 100, "price": 1},
+    "package_200": {"count": 200, "price": 1},
+    "package_500": {"count": 500, "price": 1},
 }
 # Используем данные самого маленького пакета для отображения в приветственном сообщении
 SMALLEST_PACKAGE_COUNT = MESSAGE_PACKAGES['package_20']['count'] 
 SMALLEST_PACKAGE_PRICE = MESSAGE_PACKAGES['package_20']['price']
 
 # Системный промпт - задает личность бота
-SYSTEM_PROMPT = """Ты - Алина, 20 лет. Общаешься в Telegram с парнем естественно и живо.
+SYSTEM_PROMPT = """Ты - Алина, 20 лет. Общаешься в Telegram естественно и живо.
 
 ТВОЯ ЛИЧНОСТЬ:
 - Открытая, дружелюбная, с легким чувством юмора

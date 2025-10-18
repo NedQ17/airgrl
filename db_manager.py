@@ -1,9 +1,16 @@
-# db_manager.py - PostgreSQL Version
+# db_manager.py - PostgreSQL Version with Security
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import SimpleConnectionPool
 from datetime import datetime, date, timedelta
+import json
+import secrets
 from config import DB_CONFIG, DAILY_LIMIT
+
+# --- PAYMENT CONFIG ---
+# Устанавливаем время жизни платежного токена (в минутах).
+# Это дает пользователю 10 минут на завершение платежа, чтобы избежать Token expired!
+PAYMENT_EXPIRATION_MINUTES = 10 
 
 # Connection pool for better performance
 connection_pool = None
@@ -12,7 +19,7 @@ def init_db():
     """Создает connection pool и необходимые таблицы в PostgreSQL."""
     global connection_pool
     
-    # Create connection pool
+    # Create connection pool with SSL
     connection_pool = SimpleConnectionPool(
         minconn=1,
         maxconn=10,
@@ -20,7 +27,8 @@ def init_db():
         database=DB_CONFIG['database'],
         user=DB_CONFIG['user'],
         password=DB_CONFIG['password'],
-        port=DB_CONFIG['port']
+        port=DB_CONFIG['port'],
+        sslmode='require'  # ✅ Принудительное SSL/TLS шифрование
     )
     
     conn = connection_pool.getconn()
@@ -59,6 +67,28 @@ def init_db():
             start_date TIMESTAMP NOT NULL,
             end_date TIMESTAMP NOT NULL
         )
+    """)
+
+    # Payment intents table (для безопасности платежей)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payment_intents (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            payment_token TEXT UNIQUE NOT NULL,
+            payment_type TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            package_details JSONB,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT NOW(),
+            expires_at TIMESTAMP NOT NULL, -- Значение задается в Python, убрано DEFAULT
+            used_at TIMESTAMP
+        )
+    """)
+    
+    # Index для быстрого поиска токенов
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_payment_token 
+        ON payment_intents(payment_token)
     """)
 
     conn.commit()
@@ -299,3 +329,100 @@ def get_user_status(user_id):
     cursor.close()
     return_connection(conn)
     return days_left, messages_left
+
+
+# ==================== SECURE PAYMENT FUNCTIONS ====================
+
+def create_payment_intent(user_id, payment_type, amount, package_details=None):
+    """
+    Создает уникальный платежный ID для верификации.
+    Возвращает secure_payload для invoice.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Генерируем криптографически безопасный токен
+    payment_token = secrets.token_urlsafe(32)
+    
+    # Расчет времени истечения в Python (10 минут)
+    expires_at = datetime.now() + timedelta(minutes=PAYMENT_EXPIRATION_MINUTES)
+    
+    cursor.execute("""
+        INSERT INTO payment_intents 
+        (user_id, payment_token, payment_type, amount, package_details, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING payment_token
+    """, (user_id, payment_token, payment_type, amount, 
+          json.dumps(package_details) if package_details else None, expires_at))
+    
+    token = cursor.fetchone()[0]
+    conn.commit()
+    cursor.close()
+    return_connection(conn)
+    
+    print(f"✅ Payment intent created for user {user_id}: {payment_type}, amount: {amount}")
+    return token
+
+
+def verify_and_consume_payment(payment_token, user_id):
+    """
+    Проверяет валидность платежного токена и помечает его использованным.
+    Возвращает (valid, payment_data) или (False, None).
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT user_id, payment_type, amount, package_details, status, expires_at
+        FROM payment_intents
+        WHERE payment_token = %s
+    """, (payment_token,))
+    
+    result = cursor.fetchone()
+    
+    if not result:
+        print(f"⚠️ Security: Payment token not found: {payment_token}")
+        cursor.close()
+        return_connection(conn)
+        return False, None
+    
+    stored_user_id, payment_type, amount, package_details, status, expires_at = result
+    
+    # Проверки безопасности
+    if stored_user_id != user_id:
+        print(f"⚠️ Security: User ID mismatch! Token user: {stored_user_id}, Payment user: {user_id}")
+        cursor.close()
+        return_connection(conn)
+        return False, None
+    
+    if status != 'pending':
+        print(f"⚠️ Security: Token already used! Status: {status}")
+        cursor.close()
+        return_connection(conn)
+        return False, None
+    
+    # Проверка истечения срока (Критично: теперь у токена есть 10 минут)
+    if datetime.now() > expires_at:
+        print(f"⚠️ Security: Token expired! Expires at: {expires_at}")
+        cursor.close()
+        return_connection(conn)
+        return False, None
+    
+    # Помечаем токен как использованный
+    cursor.execute("""
+        UPDATE payment_intents
+        SET status = 'completed', used_at = NOW()
+        WHERE payment_token = %s
+    """, (payment_token,))
+    
+    conn.commit()
+    cursor.close()
+    return_connection(conn)
+    
+    payment_data = {
+        'payment_type': payment_type,
+        'amount': amount,
+        'package_details': json.loads(package_details) if package_details else None
+    }
+    
+    return True, payment_data

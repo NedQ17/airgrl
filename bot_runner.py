@@ -9,6 +9,7 @@ from telegram.ext import (
     ContextTypes
 )
 import asyncio
+
 # Импортируем конфиг, базу данных и AI
 from config import *
 from db_manager import (
@@ -19,19 +20,20 @@ from db_manager import (
     activate_subscription,
     increase_limit,
     clear_user_history,
-    get_user_status 
+    get_user_status,
+    create_payment_intent,
+    verify_and_consume_payment
 )
 from ai_service import generate_ai_response
 
 
-# ========================== СЕРВИСНЫЕ ФУНКЦИИ ==========================\
+# ========================== СЕРВИСНЫЕ ФУНКЦИИ ==========================
 
 async def set_bot_commands(application):
     """Устанавливает команды меню для бота."""
     commands = [
         BotCommand("start", "Начать диалог"),
         BotCommand("mysubsc", "Моя подписка и лимиты"),
-        # ИЗМЕНЕНИЕ: Название команды, которая ведет на детали подписки
         BotCommand("subscribe", "👑Безлимит на 30 дней"), 
         BotCommand("buy_messages", "🎁Дополнительные сообщения"), 
         BotCommand("reset", "Очистить историю"),
@@ -40,7 +42,7 @@ async def set_bot_commands(application):
     print("Меню команд успешно установлено.")
 
 
-# ========================== ПЛАТЕЖИ И ИНВОЙСЫ ==========================\
+# ========================== ПЛАТЕЖИ И ИНВОЙСЫ ==========================
 
 async def pre_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Проверяет, можно ли обработать платеж."""
@@ -49,66 +51,88 @@ async def pre_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает успешную оплату Stars."""
+    """Обрабатывает успешную оплату с проверкой токена."""
     user_id = update.message.from_user.id
-    payload = update.message.successful_payment.invoice_payload
-
-    # 1. Активация подписки
-    if payload == "monthly_sub_payload":
+    payment_token = update.message.successful_payment.invoice_payload
+    
+    # ✅ КРИТИЧНО: Верифицируем платеж
+    valid, payment_data = verify_and_consume_payment(payment_token, user_id)
+    
+    if not valid:
+        print(f"⚠️ SECURITY ALERT: Invalid payment attempt by user {user_id}, token: {payment_token}")
+        await update.message.reply_text(
+            "❌ Ошибка обработки платежа. Пожалуйста, обратитесь в поддержку."
+        )
+        return
+    
+    # Обрабатываем платеж
+    if payment_data['payment_type'] == 'subscription':
         activate_subscription(user_id, duration_days=30)
         await update.message.reply_text(SUCCESS_PAYMENT_MESSAGE)
-
-    # 2. Учет пакетов сообщений (messages_20_stars_1)
-    elif payload.startswith("messages_"):
-        try:
-            parts = payload.split('_')
-            count = int(parts[1])  # Количество сообщений
-            
-            increase_limit(user_id, count_to_add=count)
-            await update.message.reply_text(f"✅ **Успешная покупка!** Вам добавлено {count} сообщений.")
-        except (IndexError, ValueError):
-            print(f"Ошибка парсинга payload: {payload}")
-            await update.message.reply_text("Спасибо за оплату! Произошла внутренняя ошибка учета, свяжитесь с поддержкой.")
+    
+    elif payment_data['payment_type'] == 'messages':
+        count = payment_data['package_details']['count']
+        increase_limit(user_id, count_to_add=count)
+        await update.message.reply_text(
+            f"✅ **Успешная покупка!** Вам добавлено {count} сообщений.",
+            parse_mode='Markdown'
+        )
+    
+    print(f"✅ Valid payment processed for user {user_id}: {payment_data}")
 
 
 async def send_subscription_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет инвойс для покупки подписки."""
+    """Отправляет инвойс для покупки подписки с защищенным payload."""
     user_id = update.effective_user.id
+    
+    # ✅ Создаем защищенный токен
+    payment_token = create_payment_intent(
+        user_id=user_id,
+        payment_type='subscription',
+        amount=SUBSCRIPTION_PRICE_STARS
+    )
     
     title = "👑 Безлимитная подписка на 30 дней"
     description = "Получите неограниченное общение с Алиной на 30 дней."
-    payload = "monthly_sub_payload"
-
+    
     await context.bot.send_invoice(
         chat_id=user_id,
         title=title,
         description=description,
-        payload=payload,
+        payload=payment_token,  # ✅ Используем безопасный токен
         provider_token=PAYMENT_PROVIDER_TOKEN,
         currency="XTR",
-        prices=[LabeledPrice("Подписка на 30 дней", SUBSCRIPTION_PRICE_STARS * 100)],
+        prices=[LabeledPrice("Подписка на 30 дней", SUBSCRIPTION_PRICE_STARS)],  # ✅ БЕЗ умножения на 100
         start_parameter='monthly_sub',
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"Купить за {SUBSCRIPTION_PRICE_STARS} ⭐", pay=True)]
         ])
     )
 
+
 async def _send_message_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, count: int, price: int, payload_key: str):
-    """Отправляет инвойс для покупки определенного пакета сообщений."""
+    """Отправляет инвойс для покупки сообщений с защищенным payload."""
     user_id = update.effective_user.id
+    
+    # ✅ Создаем защищенный токен
+    payment_token = create_payment_intent(
+        user_id=user_id,
+        payment_type='messages',
+        amount=price,
+        package_details={'count': count}
+    )
     
     title = f"🎁 Разовая покупка {count} сообщений"
     description = f"Получите {count} дополнительных сообщений для Алины. Действует бессрочно."
-    payload = payload_key 
 
     await context.bot.send_invoice(
         chat_id=user_id,
         title=title,
         description=description,
-        payload=payload,
+        payload=payment_token,  # ✅ Используем безопасный токен
         provider_token=PAYMENT_PROVIDER_TOKEN,
         currency="XTR", 
-        prices=[LabeledPrice(f"Сообщения ({count})", price * 100)],
+        prices=[LabeledPrice(f"Сообщения ({count})", price)],  # ✅ БЕЗ умножения на 100
         start_parameter=payload_key.replace('_', '-'), 
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"Купить за {price} ⭐", pay=True)]
@@ -116,7 +140,7 @@ async def _send_message_invoice(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
-# ========================== НАВИГАЦИЯ ==========================\
+# ========================== НАВИГАЦИЯ ==========================
 
 async def show_subscription_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает детали подписки с кнопкой "Купить" и "Назад".
@@ -145,6 +169,7 @@ async def show_subscription_details(update: Update, context: ContextTypes.DEFAUL
             reply_markup=reply_markup, 
             parse_mode='Markdown'
         )
+
 
 async def show_message_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отображает меню с пакетами сообщений для покупки (ответ на /buy_messages или кнопку)."""
@@ -178,7 +203,7 @@ async def show_message_packages(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 
-# ========================== ХЕНДЛЕРЫ КОМАНД ==========================\
+# ========================== ХЕНДЛЕРЫ КОМАНД ==========================
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Сбрасывает историю сообщений (память) пользователя."""
@@ -291,6 +316,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает входящие текстовые сообщения."""
     user_id = update.message.from_user.id
     user_message = update.message.text
     user_display_name = update.message.from_user.first_name
@@ -313,37 +339,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # ===== НОВОЕ: Индикатор "печатает..." =====
+    # 2. Индикатор "печатает..."
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id,
         action="typing"
     )
     
-    # Сохраняем сообщение пользователя
+    # 3. Сохраняем сообщение пользователя
     save_message(user_id, "user", user_message)
 
-    # Получаем ответ от AI
+    # 4. Получаем ответ от AI
     try:
         ai_response = generate_ai_response(user_id, user_message, user_display_name)
     except Exception as e:
-        print(f"Критическая ошибка при вызове AI: {e}")
+        print(f"Критическая ошибка при вызове AI для user {user_id}: {e}")
         ai_response = "Извини, произошел технический сбой 💔 Попробуй чуть позже."
 
-    # ===== НОВОЕ: Естественная задержка перед ответом =====
-    # Примерно 50-100 символов в секунду (как человек печатает)
+    # 5. Естественная задержка перед ответом
     typing_time = len(ai_response) / 80  # 80 символов/сек
-    typing_time = min(typing_time, 4)  # Максимум 4 секунды задержки
+    typing_time = min(typing_time, 4)  # Максимум 4 секунды
     typing_time = max(typing_time, 0.5)  # Минимум 0.5 секунды
     
     await asyncio.sleep(typing_time)
 
-    # Отправляем ответ
+    # 6. Отправляем ответ
     await update.message.reply_text(ai_response)
     save_message(user_id, "assistant", ai_response)
 
 
-
-# ========================== MAIN ==========================\
+# ========================== MAIN ==========================
 
 def main():
     """Инициализация и запуск Telegram-бота."""
@@ -368,9 +392,13 @@ def main():
     
     print("🚀 AIGirl bot is running...")
     
-    # Устанавливаем команды меню после запуска
+    # Устанавливаем команды меню после запуска (с обработкой ошибок)
     async def post_init(app):
-        await set_bot_commands(app)
+        try:
+            await set_bot_commands(app)
+        except Exception as e:
+            print(f"⚠️ Не удалось установить команды меню: {e}")
+            print("Бот продолжит работу без меню команд")
     
     application.post_init = post_init
     application.run_polling(allowed_updates=Update.ALL_TYPES)
