@@ -8,6 +8,7 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
+from telegram.error import TelegramError
 import asyncio
 from datetime import time as dt_time
 
@@ -27,6 +28,48 @@ from db_manager import (
     cleanup_all_old_messages
 )
 from ai_service import generate_ai_response
+
+
+# ========================== ПРОВЕРКА ПОДПИСКИ ==========================
+
+async def check_channel_subscription(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Проверяет, подписан ли пользователь на канал.
+    Возвращает True если подписан, False если нет.
+    """
+    try:
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        # Статусы: creator, administrator, member = подписан
+        # left, kicked = не подписан
+        return member.status in ['creator', 'administrator', 'member']
+    except TelegramError as e:
+        print(f"⚠️ Ошибка проверки подписки для user {user_id}: {e}")
+        # В случае ошибки (например, бот не админ канала) пропускаем проверку
+        return True
+
+
+async def send_subscription_required_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Отправляет сообщение с требованием подписки на канал.
+    """
+    keyboard = [
+        [InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}")],
+        [InlineKeyboardButton("✅ Я подписался", callback_data="check_subscription")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.message:
+        await update.message.reply_text(
+            SUBSCRIPTION_REQUIRED_MESSAGE,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(
+            SUBSCRIPTION_REQUIRED_MESSAGE,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
 
 
 # ========================== СЕРВИСНЫЕ ФУНКЦИИ ==========================
@@ -73,10 +116,7 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text(SUCCESS_PAYMENT_MESSAGE)
     
     elif payment_data['payment_type'] == 'messages':
-        # ✅ ИСПРАВЛЕНИЕ: Извлекаем количество сообщений из словаря package_details
         count = payment_data['package_details']['count']
-        
-        # Вызываем функцию увеличения лимита
         increase_limit(user_id, count_to_add=count)
         
         await update.message.reply_text(
@@ -168,6 +208,11 @@ async def show_subscription_details(update: Update, context: ContextTypes.DEFAUL
     else:
         return
     
+    # Проверяем подписку на канал
+    if not await check_channel_subscription(user_id, context):
+        await send_subscription_required_message(update, context)
+        return
+    
     # Проверяем наличие активной подписки
     if is_user_subscribed(user_id):
         days_left, _ = get_user_status(user_id)
@@ -208,6 +253,19 @@ async def show_subscription_details(update: Update, context: ContextTypes.DEFAUL
 async def show_message_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отображает меню с пакетами сообщений для покупки."""
     
+    # Получаем user_id
+    if update.message:
+        user_id = update.message.from_user.id
+    elif update.callback_query:
+        user_id = update.callback_query.from_user.id
+    else:
+        return
+    
+    # Проверяем подписку на канал
+    if not await check_channel_subscription(user_id, context):
+        await send_subscription_required_message(update, context)
+        return
+    
     keyboard = []
     
     # Сборка кнопок из MESSAGE_PACKAGES
@@ -241,9 +299,16 @@ async def show_message_packages(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Запрашивает подтверждение перед сбросом истории."""
+    user_id = update.message.from_user.id
+    
+    # Проверяем подписку на канал
+    if not await check_channel_subscription(user_id, context):
+        await send_subscription_required_message(update, context)
+        return
+    
     keyboard = [
         [InlineKeyboardButton("🗑️ Очистить историю навсегда", callback_data="confirm_reset_history")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_status")] # Добавлена кнопка Назад
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_status")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -292,6 +357,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         return
     
+    # Проверяем подписку на канал
+    if not await check_channel_subscription(user_id, context):
+        await send_subscription_required_message(update, context)
+        return
+    
     # Получаем статус
     days_left, messages_info = get_user_status(user_id)
 
@@ -307,19 +377,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Лимит: **Безлимит**."
         )
     else:
-        # messages_info содержит total/daily/purchased
         total = messages_info.get('total') if isinstance(messages_info, dict) else messages_info
         daily = messages_info.get('daily') if isinstance(messages_info, dict) else None
         purchased = messages_info.get('purchased') if isinstance(messages_info, dict) else 0
 
         if isinstance(messages_info, dict) and purchased and purchased > 0:
-            # Покупные сообщения присутствуют — покажем разбивку
             status_text = (
                 f"🆓 Доступно сегодня: {total} сообщений ({daily} дневных + {purchased} куплено).\n"
                 f"Чтобы продолжить общение, Вы можете:\n"
             )
         else:
-            # Обычный дневной лимит
             status_text = (
                 f"🆓 **Ваш дневной лимит:** {daily}/{DAILY_LIMIT} сообщений.\n"
                 f"Чтобы продолжить общение, Вы можете:\n"
@@ -357,6 +424,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     data = query.data
+    user_id = query.from_user.id
+
+    # ПРОВЕРКА ПОДПИСКИ НА КАНАЛ (кнопка "Я подписался")
+    if data == 'check_subscription':
+        if await check_channel_subscription(user_id, context):
+            await start_command(update, context)
+        else:
+            await query.answer(
+                "❌ Вы еще не подписались на канал. Пожалуйста, подпишитесь и попробуйте снова.",
+                show_alert=True
+            )
+        return
 
     # НАВИГАЦИЯ (Кнопка Назад)
     if data == 'back_to_status':
@@ -403,6 +482,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_message = update.message.text
     user_display_name = update.message.from_user.first_name
+
+    # 0. Проверяем подписку на канал
+    if not await check_channel_subscription(user_id, context):
+        await send_subscription_required_message(update, context)
+        return
 
     # 1. Проверка подписки и лимита
     if not is_user_subscribed(user_id) and not check_and_increment_limit(user_id, DAILY_LIMIT):
@@ -473,7 +557,7 @@ def main():
     application.add_handler(CommandHandler("mysubsc", start_command))
     application.add_handler(CommandHandler("subscribe", show_subscription_details)) 
     application.add_handler(CommandHandler("buy_messages", show_message_packages))
-    application.add_handler(CommandHandler("reset", reset_command)) # ИЗМЕНЕНИЕ: Теперь ведет на подтверждение
+    application.add_handler(CommandHandler("reset", reset_command))
     
     # Сообщения
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
