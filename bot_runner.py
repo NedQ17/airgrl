@@ -73,10 +73,14 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text(SUCCESS_PAYMENT_MESSAGE)
     
     elif payment_data['payment_type'] == 'messages':
+        # ✅ ИСПРАВЛЕНИЕ: Извлекаем количество сообщений из словаря package_details
         count = payment_data['package_details']['count']
+        
+        # Вызываем функцию увеличения лимита
         increase_limit(user_id, count_to_add=count)
+        
         await update.message.reply_text(
-            f"✅ **Успешная покупка!** Вам добавлено {count} сообщений.",
+            f"✅ **Успешная покупка!** Вам добавлено **{count}** сообщений. Ваш лимит обновлен.",
             parse_mode='Markdown'
         )
     
@@ -289,7 +293,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Получаем статус
-    days_left, messages_left = get_user_status(user_id) 
+    days_left, messages_info = get_user_status(user_id)
 
     welcome_message = (
         "Привет! Я Алина и я здесь для тебя! 💕\n"
@@ -303,10 +307,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Лимит: **Безлимит**."
         )
     else:
-        status_text = (
-            f"🆓 **Ваш дневной лимит:** {messages_left}/{DAILY_LIMIT} сообщений.\n"
-            f"Чтобы продолжить общение, Вы можете:\n"
-        )
+        # messages_info содержит total/daily/purchased
+        total = messages_info.get('total') if isinstance(messages_info, dict) else messages_info
+        daily = messages_info.get('daily') if isinstance(messages_info, dict) else None
+        purchased = messages_info.get('purchased') if isinstance(messages_info, dict) else 0
+
+        if isinstance(messages_info, dict) and purchased and purchased > 0:
+            # Покупные сообщения присутствуют — покажем разбивку
+            status_text = (
+                f"🆓 Доступно сегодня: {total} сообщений ({daily} дневных + {purchased} куплено).\n"
+                f"Чтобы продолжить общение, Вы можете:\n"
+            )
+        else:
+            # Обычный дневной лимит
+            status_text = (
+                f"🆓 **Ваш дневной лимит:** {daily}/{DAILY_LIMIT} сообщений.\n"
+                f"Чтобы продолжить общение, Вы можете:\n"
+            )
     
     # Создаем кнопки для покупки
     keyboard = [

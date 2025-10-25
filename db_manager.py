@@ -28,7 +28,7 @@ def init_db():
         user=DB_CONFIG['user'],
         password=DB_CONFIG['password'],
         port=DB_CONFIG['port'],
-        sslmode='require'  # ✅ Принудительное SSL/TLS шифрование
+        sslmode='require'  # Принудительное SSL/TLS шифрование
     )
     
     conn = connection_pool.getconn()
@@ -80,7 +80,7 @@ def init_db():
             package_details JSONB,
             status TEXT DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT NOW(),
-            expires_at TIMESTAMP NOT NULL, -- Значение задается в Python, убрано DEFAULT
+            expires_at TIMESTAMP NOT NULL,
             used_at TIMESTAMP
         )
     """)
@@ -95,6 +95,64 @@ def init_db():
     cursor.close()
     connection_pool.putconn(conn)
     print("✅ PostgreSQL database initialized successfully")
+
+def get_user_status(user_id):
+    """
+    Возвращает кортеж (days_left, messages_info)
+
+    days_left: int | None - число дней подписки или None
+    messages_info: dict с ключами:
+        - total: int - общее количество доступных сообщений сегодня (дневной лимит + купленные)
+        - daily: int - оставшийся дневной лимит (0..DAILY_LIMIT)
+        - purchased: int - количество купленных сообщений, доступных сегодня (может быть 0)
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 1. Получаем статус подписки
+    cursor.execute(
+        "SELECT end_date FROM subscriptions WHERE user_id = %s",
+        (user_id,)
+    )
+    sub_result = cursor.fetchone()
+
+    days_left = None
+    if sub_result and sub_result[0] and sub_result[0] > datetime.now():
+        delta = sub_result[0] - datetime.now()
+        days_left = max(0, delta.days)
+
+    # 2. Получаем текущий счетчик лимита
+    cursor.execute(
+        "SELECT count, date FROM limits WHERE user_id = %s",
+        (user_id,)
+    )
+    limit_result = cursor.fetchone()
+
+    current_count = 0
+    if limit_result:
+        # Если дата совпадает ИЛИ счетчик отрицательный (есть купленные сообщения), используем текущий счетчик
+        if limit_result[1] == date.today() or limit_result[0] < 0:
+            current_count = limit_result[0]
+        else:
+            current_count = 0
+
+    # current_count: положительное = сообщений потрачено сегодня,
+    # отрицательное = купленные сообщения, оставшиеся (например -20 означает 20 куплено)
+    purchased_remaining = -current_count if current_count < 0 else 0
+    used_today = current_count if current_count > 0 else 0
+
+    remaining_daily = max(0, DAILY_LIMIT - used_today)
+    total_available = remaining_daily + purchased_remaining
+
+    messages_info = {
+        'total': total_available,
+        'daily': remaining_daily,
+        'purchased': purchased_remaining
+    }
+
+    cursor.close()
+    return_connection(conn)
+    return days_left, messages_info
 
 
 def get_connection():
@@ -242,30 +300,43 @@ def increase_limit(user_id, count_to_add):
     conn = get_connection()
     cursor = conn.cursor()
     today = date.today()
-
-    cursor.execute(
-        "SELECT count, date FROM limits WHERE user_id = %s",
-        (user_id,)
-    )
-    result = cursor.fetchone()
-
-    if result and result[1] == today:
-        current_count = result[0]
-    else:
-        current_count = 0
-
-    new_count = current_count - count_to_add
-
-    cursor.execute("""
-        INSERT INTO limits (user_id, date, count)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (user_id)
-        DO UPDATE SET date = EXCLUDED.date, count = EXCLUDED.count
-    """, (user_id, today, new_count))
     
-    conn.commit()
-    cursor.close()
-    return_connection(conn)
+    try: # Добавлен блок try для обработки ошибок
+        cursor.execute(
+            "SELECT count, date FROM limits WHERE user_id = %s",
+            (user_id,)
+        )
+        result = cursor.fetchone()
+
+        if result and result[1] == today:
+            current_count = result[0]
+        else:
+            # ИСПРАВЛЕНИЕ: Если наступил новый день, но счетчик отрицательный (купленные сообщения), 
+            # мы не обнуляем его, а оставляем, чтобы сохранить купленный лимит.
+            if result and result[0] < 0:
+                current_count = result[0]
+            else:
+                current_count = 0
+            
+        new_count = current_count - count_to_add
+
+        cursor.execute("""
+            INSERT INTO limits (user_id, date, count)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id)
+            DO UPDATE SET date = EXCLUDED.date, count = EXCLUDED.count
+        """, (user_id, today, new_count))
+        
+        conn.commit()
+        print(f"✅ Limit updated for user {user_id}: added {count_to_add} messages. New effective count = {new_count}")
+
+    except Exception as e: 
+        conn.rollback()
+        print(f"❌ CRITICAL ERROR increasing limit for user {user_id}: {e}")
+        
+    finally: # Гарантированное закрытие ресурсов
+        cursor.close()
+        return_connection(conn)
 
 
 def clear_user_history(user_id):
@@ -279,56 +350,6 @@ def clear_user_history(user_id):
     cursor.close()
     return_connection(conn)
     print(f"[DEBUG] История сообщений пользователя {user_id} успешно очищена.")
-
-
-def get_user_status(user_id):
-    """
-    Возвращает статус подписки (дни до конца или None) 
-    и оставшееся количество сообщений на сегодня.
-    """
-    conn = get_connection()
-    cursor = conn.cursor()
-    today_date = datetime.now()
-
-    # 1. Получаем статус подписки
-    cursor.execute(
-        "SELECT end_date FROM subscriptions WHERE user_id = %s",
-        (user_id,)
-    )
-    sub_result = cursor.fetchone()
-
-    days_left = None
-    if sub_result:
-        sub_end_date = sub_result[0]
-        if sub_end_date > today_date:
-            time_left = sub_end_date - today_date
-            days_left = time_left.days + 1
-
-    # 2. Получаем оставшиеся сообщения
-    cursor.execute(
-        "SELECT count, date FROM limits WHERE user_id = %s",
-        (user_id,)
-    )
-    limit_result = cursor.fetchone()
-
-    current_count = 0
-    if limit_result and limit_result[1] == date.today():
-        current_count = limit_result[0]
-
-    messages_left = None
-
-    if days_left is not None and days_left > 0:
-        messages_left = "∞ (Безлимит)"
-    else:
-        messages_left_count = DAILY_LIMIT - current_count
-        messages_left = max(0, messages_left_count)
-
-        if messages_left_count > DAILY_LIMIT:
-             messages_left = messages_left_count
-
-    cursor.close()
-    return_connection(conn)
-    return days_left, messages_left
 
 
 # ==================== SECURE PAYMENT FUNCTIONS ====================
@@ -422,54 +443,40 @@ def verify_and_consume_payment(payment_token, user_id):
     payment_data = {
         'payment_type': payment_type,
         'amount': amount,
-        'package_details': json.loads(package_details) if package_details else None
+        'package_details': None
     }
+
+    # package_details may be stored as JSONB (returned as dict) or as a JSON string.
+    if package_details:
+        try:
+            if isinstance(package_details, (str, bytes)):
+                payment_data['package_details'] = json.loads(package_details)
+            else:
+                # Already a dict/object from psycopg2 JSONB
+                payment_data['package_details'] = package_details
+        except Exception as e:
+            print(f"⚠️ Warning: failed to parse package_details for token {payment_token}: {e}")
+            payment_data['package_details'] = None
     
     return True, payment_data
 
-# Добавь в конец db_manager.py
 
-def cleanup_old_messages_for_user(user_id, days_to_keep=7):
-    """
-    Удаляет сообщения старше N дней для конкретного пользователя.
-    """
+def cleanup_all_old_messages(days_to_keep: int = 7):
+    """Удаляет сообщения старше days_to_keep дней и возвращает количество удалённых записей."""
     conn = get_connection()
     cursor = conn.cursor()
-    
-    cursor.execute("""
-        DELETE FROM messages 
-        WHERE user_id = %s 
-        AND timestamp < NOW() - INTERVAL '%s days'
-    """, (user_id, days_to_keep))
-    
-    deleted_count = cursor.rowcount
+
+    cutoff = datetime.now() - timedelta(days=days_to_keep)
+
+    cursor.execute(
+        "DELETE FROM messages WHERE timestamp < %s",
+        (cutoff,)
+    )
+    deleted = cursor.rowcount
+
     conn.commit()
     cursor.close()
     return_connection(conn)
-    
-    if deleted_count > 0:
-        print(f"🗑️ Cleaned {deleted_count} old messages for user {user_id}")
-    
-    return deleted_count
 
-
-def cleanup_all_old_messages(days_to_keep=7):
-    """
-    Удаляет старые сообщения для всех пользователей.
-    Запускать через cron или scheduler.
-    """
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        DELETE FROM messages 
-        WHERE timestamp < NOW() - INTERVAL '%s days'
-    """, (days_to_keep,))
-    
-    deleted_count = cursor.rowcount
-    conn.commit()
-    cursor.close()
-    return_connection(conn)
-    
-    print(f"🗑️ Cleaned {deleted_count} total old messages")
-    return deleted_count
+    print(f"[CLEANUP] Deleted {deleted} messages older than {days_to_keep} days.")
+    return deleted
