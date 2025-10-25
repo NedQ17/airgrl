@@ -37,14 +37,50 @@ async def check_channel_subscription(user_id: int, context: ContextTypes.DEFAULT
     Проверяет, подписан ли пользователь на канал.
     Возвращает True если подписан, False если нет.
     """
+    # Если переменные канала не заданы, пропускаем проверку
+    if not CHANNEL_ID and not CHANNEL_USERNAME:
+        print("⚠️ CHANNEL_ID и CHANNEL_USERNAME не заданы. Проверка подписки отключена.")
+        return True
+    
     try:
-        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        # Пытаемся использовать ID, если задан
+        if CHANNEL_ID:
+            chat_id = CHANNEL_ID
+        # Иначе используем username (только для публичных каналов)
+        elif CHANNEL_USERNAME:
+            chat_id = CHANNEL_USERNAME
+        else:
+            return True
+            
+        member = await context.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         # Статусы: creator, administrator, member = подписан
         # left, kicked = не подписан
-        return member.status in ['creator', 'administrator', 'member']
+        is_subscribed = member.status in ['creator', 'administrator', 'member']
+        
+        if not is_subscribed:
+            print(f"ℹ️ User {user_id} не подписан на канал. Статус: {member.status}")
+        
+        return is_subscribed
+        
     except TelegramError as e:
-        print(f"⚠️ Ошибка проверки подписки для user {user_id}: {e}")
-        # В случае ошибки (например, бот не админ канала) пропускаем проверку
+        error_message = str(e).lower()
+        
+        # Разные типы ошибок
+        if "chat not found" in error_message:
+            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Канал не найден!")
+            print(f"   CHANNEL_ID: {CHANNEL_ID}")
+            print(f"   CHANNEL_USERNAME: {CHANNEL_USERNAME}")
+            print(f"   Проверьте:")
+            print(f"   1. Бот добавлен в администраторы канала?")
+            print(f"   2. ID канала правильный? (должен начинаться с -100)")
+            print(f"   3. Используйте @raw_data_bot для получения ID")
+        elif "bot was kicked" in error_message:
+            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Бота удалили из канала!")
+            print(f"   Заново добавьте бота в администраторы канала.")
+        else:
+            print(f"⚠️ Ошибка проверки подписки для user {user_id}: {e}")
+        
+        # В случае ошибки пропускаем проверку, чтобы не блокировать бота
         return True
 
 
@@ -297,6 +333,73 @@ async def show_message_packages(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ========================== ХЕНДЛЕРЫ КОМАНД ==========================
 
+async def test_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тестовая команда для проверки настройки канала (только для отладки)"""
+    if not update.message:
+        return
+        
+    user_id = update.message.from_user.id
+    
+    # Проверяем переменные
+    config_status = (
+        f"📋 **Конфигурация канала:**\n\n"
+        f"CHANNEL_USERNAME: `{CHANNEL_USERNAME}`\n"
+        f"CHANNEL_ID: `{CHANNEL_ID}`\n"
+        f"Type: `{type(CHANNEL_ID).__name__}`\n\n"
+    )
+    
+    # Пытаемся получить информацию о канале
+    try:
+        if CHANNEL_ID:
+            chat_id = CHANNEL_ID
+        elif CHANNEL_USERNAME:
+            chat_id = CHANNEL_USERNAME
+        else:
+            await update.message.reply_text(
+                "❌ CHANNEL_ID и CHANNEL_USERNAME не заданы в .env файле!",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Получаем инфо о чате
+        chat = await context.bot.get_chat(chat_id)
+        chat_info = (
+            f"✅ **Канал найден!**\n\n"
+            f"Название: {chat.title}\n"
+            f"Username: @{chat.username if chat.username else 'Нет'}\n"
+            f"ID: `{chat.id}`\n"
+            f"Тип: {chat.type}\n\n"
+        )
+        
+        # Проверяем подписку пользователя
+        member = await context.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        subscription_status = (
+            f"👤 **Ваш статус:**\n\n"
+            f"Статус: **{member.status}**\n"
+            f"Подписан: {'✅ Да' if member.status in ['creator', 'administrator', 'member'] else '❌ Нет'}\n"
+        )
+        
+        await update.message.reply_text(
+            config_status + chat_info + subscription_status,
+            parse_mode='Markdown'
+        )
+        
+    except TelegramError as e:
+        error_text = (
+            f"❌ **Ошибка при проверке канала:**\n\n"
+            f"`{str(e)}`\n\n"
+            f"**Возможные причины:**\n"
+            f"1. Бот не добавлен в администраторы канала\n"
+            f"2. Неправильный CHANNEL_ID (должен начинаться с -100)\n"
+            f"3. Канал не существует или недоступен\n\n"
+            f"**Решение:**\n"
+            f"- Добавьте бота в администраторы канала\n"
+            f"- Получите ID через @raw_data_bot\n"
+            f"- Проверьте .env файл\n"
+        )
+        await update.message.reply_text(error_text, parse_mode='Markdown')
+
+
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Запрашивает подтверждение перед сбросом истории."""
     user_id = update.message.from_user.id
@@ -479,6 +582,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает входящие текстовые сообщения."""
+    # Проверяем наличие сообщения
+    if not update.message or not update.message.text:
+        return
+    
     user_id = update.message.from_user.id
     user_message = update.message.text
     user_display_name = update.message.from_user.first_name
@@ -534,6 +641,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_message(user_id, "assistant", ai_response)
 
 
+# ========================== ОБРАБОТЧИК ОШИБОК ==========================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Глобальный обработчик ошибок."""
+    import traceback
+    
+    # Логируем ошибку
+    print(f"❌ Exception while handling an update:")
+    print(f"Update: {update}")
+    print(f"Error: {context.error}")
+    
+    # Детальный traceback для отладки
+    tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
+    tb_string = ''.join(tb_list)
+    print(f"Traceback:\n{tb_string}")
+    
+    # Пытаемся отправить сообщение пользователю (если возможно)
+    try:
+        if update and hasattr(update, 'effective_user') and update.effective_user:
+            await context.bot.send_message(
+                chat_id=update.effective_user.id,
+                text="Произошла ошибка при обработке вашего сообщения. Попробуйте позже."
+            )
+    except:
+        pass  # Игнорируем, если не удалось отправить
+
+
 # ========================== ПЛАНИРОВЩИК ЗАДАЧ ==========================
 
 async def daily_cleanup(context):
@@ -559,6 +693,9 @@ def main():
     application.add_handler(CommandHandler("buy_messages", show_message_packages))
     application.add_handler(CommandHandler("reset", reset_command))
     
+    # ТЕСТОВАЯ КОМАНДА (удалите после настройки канала)
+    application.add_handler(CommandHandler("testchannel", test_channel_command))
+    
     # Сообщения
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
@@ -566,6 +703,9 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
+    
+    # Глобальный обработчик ошибок
+    application.add_error_handler(error_handler)
     
     # Запускаем ежедневную очистку в 3 утра
     application.job_queue.run_daily(
