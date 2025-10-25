@@ -7,6 +7,20 @@ import json
 import secrets
 from config import DB_CONFIG, DAILY_LIMIT
 
+from config import DB_CONFIG, DAILY_LIMIT, ENCRYPTION_KEY # !!! Добавьте ENCRYPTION_KEY
+from cryptography.fernet import Fernet # !!! Новый импорт
+
+# Инициализация шифровальщика
+CIPHER_SUITE = None
+if ENCRYPTION_KEY:
+    try:
+        # Инициализация Fernet на основе ключа из config.py
+        CIPHER_SUITE = Fernet(ENCRYPTION_KEY)
+        print("🔒 Encryption active.")
+    except Exception as e:
+        # Важно: если ключ невалиден, бот должен об этом сообщить
+        print(f"❌ CRITICAL: Failed to initialize Fernet cipher. Check ENCRYPTION_KEY: {e}")
+
 # --- PAYMENT CONFIG ---
 # Устанавливаем время жизни платежного токена (в минутах).
 # Это дает пользователю 10 минут на завершение платежа, чтобы избежать Token expired!
@@ -156,13 +170,37 @@ def get_user_status(user_id):
 
 
 def get_connection():
-    """Получает соединение из пула."""
-    return connection_pool.getconn()
-
+    """
+    Извлекает соединение из пула, ПРОВЕРЯЯ его на активность.
+    Если соединение неактивно (из-за тайм-аута сервера), 
+    оно закрывается и возвращается в пул, после чего берется новое.
+    """
+    conn = connection_pool.getconn()
+    
+    try:
+        # Простейший способ проверить, живо ли соединение: 
+        # выполнить легкий, не изменяющий данные запрос (ROLLBACK)
+        conn.rollback() 
+        return conn
+        
+    except psycopg2.InterfaceError: 
+        # Если произошла InterfaceError, соединение мертво.
+        print("⚠️ Обнаружено неактивное соединение в пуле. Закрытие и получение нового.")
+        
+        # 1. Сначала возвращаем мертвое соединение в пул, принудительно его закрыв
+        connection_pool.putconn(conn, close=True)
+        
+        # 2. Получаем новое, свежее соединение
+        conn = connection_pool.getconn()
+        
+        # 3. Возвращаем новое соединение
+        return conn
 
 def return_connection(conn):
     """Возвращает соединение в пул."""
+    # Убедитесь, что эта функция осталась прежней
     connection_pool.putconn(conn)
+
 
 
 def is_user_subscribed(user_id):
@@ -216,11 +254,14 @@ def activate_subscription(user_id, duration_days=30):
     return_connection(conn)
 
 
+# db_manager.py - Обновление get_chat_history
+
 def get_chat_history(user_id, limit=5):
-    """Возвращает последние N сообщений."""
+    """Возвращает последние N сообщений. Content РАСШИФРОВЫВАЕТСЯ."""
     conn = get_connection()
     cursor = conn.cursor()
     
+    # ... (SQL-запрос остается прежним)
     cursor.execute("""
         SELECT role, content 
         FROM messages 
@@ -233,19 +274,28 @@ def get_chat_history(user_id, limit=5):
     cursor.close()
     return_connection(conn)
 
-    history = [{"role": row[0], "content": row[1]} for row in reversed(history_raw)]
+    history = []
+    for row in reversed(history_raw):
+        # 💥 РАСШИФРОВАНИЕ ЗДЕСЬ
+        # row[1] содержит зашифрованное содержимое
+        decrypted_content = decrypt_data(row[1])
+        history.append({"role": row[0], "content": decrypted_content})
+
     return history
 
 
 def save_message(user_id, role, content):
-    """Сохраняет сообщение БЕЗ автоудаления (управляется memory_system)."""
+    """Сохраняет сообщение. Content ШИФРУЕТСЯ перед записью."""
     conn = get_connection()
     cursor = conn.cursor()
+    
+    # 💥 ШИФРОВАНИЕ ЗДЕСЬ
+    encrypted_content = encrypt_data(content)
     
     cursor.execute("""
         INSERT INTO messages (user_id, role, content)
         VALUES (%s, %s, %s)
-    """, (user_id, role, content))
+    """, (user_id, role, encrypted_content))
     
     conn.commit()
     cursor.close()
@@ -480,3 +530,30 @@ def cleanup_all_old_messages(days_to_keep: int = 7):
 
     print(f"[CLEANUP] Deleted {deleted} messages older than {days_to_keep} days.")
     return deleted
+
+# db_manager.py - Функции шифрования
+
+def encrypt_data(data: str) -> str:
+    """Шифрует строку в URL-safe base64."""
+    if not CIPHER_SUITE:
+        # Если шифрование не активно, просто сохраняем данные как есть (для отладки)
+        return data
+    
+    encoded_data = data.encode('utf-8')
+    encrypted_bytes = CIPHER_SUITE.encrypt(encoded_data)
+    # Возвращаем Base64 строку для хранения в TEXT/VARCHAR
+    return encrypted_bytes.decode('utf-8')
+
+def decrypt_data(encrypted_data: str) -> str:
+    """Расшифровывает строку base64 в исходную строку."""
+    if not CIPHER_SUITE:
+        return encrypted_data
+        
+    try:
+        encrypted_bytes = encrypted_data.encode('utf-8')
+        decrypted_bytes = CIPHER_SUITE.decrypt(encrypted_bytes)
+        return decrypted_bytes.decode('utf-8')
+    except Exception as e:
+        # Если ключ изменился или данные повреждены
+        print(f"❌ Decryption Error: {e} for data: {encrypted_data[:20]}...")
+        return f"[DECRYPTION FAILED: {encrypted_data[:10]}...]"

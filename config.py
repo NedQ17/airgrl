@@ -10,6 +10,7 @@ load_dotenv()
 TOKEN_TG = os.getenv('TOKEN_TG')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 PAYMENT_PROVIDER_TOKEN = os.getenv('PAYMENT_PROVIDER_TOKEN')
+ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY')
 
 # --- Database Configuration (Supabase PostgreSQL) ---
 DB_CONFIG = {
