@@ -180,7 +180,7 @@ def get_chat_history(user_id, limit=5):
 
 
 def save_message(user_id, role, content):
-    """Сохраняет сообщение в историю."""
+    """Сохраняет сообщение БЕЗ автоудаления (управляется memory_system)."""
     conn = get_connection()
     cursor = conn.cursor()
     
@@ -426,3 +426,50 @@ def verify_and_consume_payment(payment_token, user_id):
     }
     
     return True, payment_data
+
+# Добавь в конец db_manager.py
+
+def cleanup_old_messages_for_user(user_id, days_to_keep=7):
+    """
+    Удаляет сообщения старше N дней для конкретного пользователя.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        DELETE FROM messages 
+        WHERE user_id = %s 
+        AND timestamp < NOW() - INTERVAL '%s days'
+    """, (user_id, days_to_keep))
+    
+    deleted_count = cursor.rowcount
+    conn.commit()
+    cursor.close()
+    return_connection(conn)
+    
+    if deleted_count > 0:
+        print(f"🗑️ Cleaned {deleted_count} old messages for user {user_id}")
+    
+    return deleted_count
+
+
+def cleanup_all_old_messages(days_to_keep=7):
+    """
+    Удаляет старые сообщения для всех пользователей.
+    Запускать через cron или scheduler.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        DELETE FROM messages 
+        WHERE timestamp < NOW() - INTERVAL '%s days'
+    """, (days_to_keep,))
+    
+    deleted_count = cursor.rowcount
+    conn.commit()
+    cursor.close()
+    return_connection(conn)
+    
+    print(f"🗑️ Cleaned {deleted_count} total old messages")
+    return deleted_count

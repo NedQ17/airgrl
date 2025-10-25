@@ -9,6 +9,7 @@ from telegram.ext import (
     ContextTypes
 )
 import asyncio
+from datetime import time as dt_time
 
 # Импортируем конфиг, базу данных и AI
 from config import *
@@ -22,7 +23,8 @@ from db_manager import (
     clear_user_history,
     get_user_status,
     create_payment_intent,
-    verify_and_consume_payment
+    verify_and_consume_payment,
+    cleanup_all_old_messages
 )
 from ai_service import generate_ai_response
 
@@ -34,15 +36,15 @@ async def set_bot_commands(application):
     commands = [
         BotCommand("start", "Начать диалог"),
         BotCommand("mysubsc", "Моя подписка и лимиты"),
-        BotCommand("subscribe", "👑Безлимит на 30 дней"), 
-        BotCommand("buy_messages", "🎁Дополнительные сообщения"), 
+        BotCommand("subscribe", "Безлимит на 30 дней"), 
+        BotCommand("buy_messages", "Дополнительные сообщения"), 
         BotCommand("reset", "Очистить историю"),
     ]
     await application.bot.set_my_commands(commands)
     print("Меню команд успешно установлено.")
 
 
-# ========================== ПЛАТЕЖИ И ИНВОЙСЫ ==========================
+# ========================== ПЛАТЕЖИ ==========================
 
 async def pre_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Проверяет, можно ли обработать платеж."""
@@ -55,11 +57,11 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     user_id = update.message.from_user.id
     payment_token = update.message.successful_payment.invoice_payload
     
-    # ✅ КРИТИЧНО: Верифицируем платеж
+    # Верифицируем платеж
     valid, payment_data = verify_and_consume_payment(payment_token, user_id)
     
     if not valid:
-        print(f"⚠️ SECURITY ALERT: Invalid payment attempt by user {user_id}, token: {payment_token}")
+        print(f"SECURITY ALERT: Invalid payment attempt by user {user_id}, token: {payment_token}")
         await update.message.reply_text(
             "❌ Ошибка обработки платежа. Пожалуйста, обратитесь в поддержку."
         )
@@ -78,14 +80,14 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
             parse_mode='Markdown'
         )
     
-    print(f"✅ Valid payment processed for user {user_id}: {payment_data}")
+    print(f"Valid payment processed for user {user_id}: {payment_data}")
 
 
 async def send_subscription_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправляет инвойс для покупки подписки с защищенным payload."""
     user_id = update.effective_user.id
     
-    # ✅ Проверяем, нет ли уже активной подписки
+    # Проверяем, нет ли уже активной подписки
     if is_user_subscribed(user_id):
         days_left, _ = get_user_status(user_id)
         await update.callback_query.answer(
@@ -94,7 +96,7 @@ async def send_subscription_invoice(update: Update, context: ContextTypes.DEFAUL
         )
         return
     
-    # ✅ Создаем защищенный токен
+    # Создаем защищенный токен
     payment_token = create_payment_intent(
         user_id=user_id,
         payment_type='subscription',
@@ -108,10 +110,10 @@ async def send_subscription_invoice(update: Update, context: ContextTypes.DEFAUL
         chat_id=user_id,
         title=title,
         description=description,
-        payload=payment_token,  # ✅ Используем безопасный токен
+        payload=payment_token,
         provider_token=PAYMENT_PROVIDER_TOKEN,
         currency="XTR",
-        prices=[LabeledPrice("Подписка на 30 дней", SUBSCRIPTION_PRICE_STARS)],  # ✅ БЕЗ умножения на 100
+        prices=[LabeledPrice("Подписка на 30 дней", SUBSCRIPTION_PRICE_STARS)],
         start_parameter='monthly_sub',
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"Купить за {SUBSCRIPTION_PRICE_STARS} ⭐", pay=True)]
@@ -123,7 +125,7 @@ async def _send_message_invoice(update: Update, context: ContextTypes.DEFAULT_TY
     """Отправляет инвойс для покупки сообщений с защищенным payload."""
     user_id = update.effective_user.id
     
-    # ✅ Создаем защищенный токен
+    # Создаем защищенный токен
     payment_token = create_payment_intent(
         user_id=user_id,
         payment_type='messages',
@@ -138,10 +140,10 @@ async def _send_message_invoice(update: Update, context: ContextTypes.DEFAULT_TY
         chat_id=user_id,
         title=title,
         description=description,
-        payload=payment_token,  # ✅ Используем безопасный токен
+        payload=payment_token,
         provider_token=PAYMENT_PROVIDER_TOKEN,
         currency="XTR", 
-        prices=[LabeledPrice(f"Сообщения ({count})", price)],  # ✅ БЕЗ умножения на 100
+        prices=[LabeledPrice(f"Сообщения ({count})", price)],
         start_parameter=payload_key.replace('_', '-'), 
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"Купить за {price} ⭐", pay=True)]
@@ -152,8 +154,7 @@ async def _send_message_invoice(update: Update, context: ContextTypes.DEFAULT_TY
 # ========================== НАВИГАЦИЯ ==========================
 
 async def show_subscription_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает детали подписки с кнопкой "Купить" и "Назад".
-    Работает как для кнопки в чате, так и для команды /subscribe."""
+    """Показывает детали подписки с кнопкой Купить и Назад."""
     
     # Получаем user_id из правильного источника
     if update.message:
@@ -163,7 +164,7 @@ async def show_subscription_details(update: Update, context: ContextTypes.DEFAUL
     else:
         return
     
-    # ✅ Проверяем наличие активной подписки
+    # Проверяем наличие активной подписки
     if is_user_subscribed(user_id):
         days_left, _ = get_user_status(user_id)
         message_text = (
@@ -189,7 +190,7 @@ async def show_subscription_details(update: Update, context: ContextTypes.DEFAUL
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # Определяем, как отправить/отредактировать сообщение
+    # Отправляем или редактируем сообщение
     if update.message:
         await update.message.reply_text(message_text, reply_markup=reply_markup, parse_mode='Markdown')
     elif update.callback_query:
@@ -201,7 +202,7 @@ async def show_subscription_details(update: Update, context: ContextTypes.DEFAUL
 
 
 async def show_message_packages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отображает меню с пакетами сообщений для покупки (ответ на /buy_messages или кнопку)."""
+    """Отображает меню с пакетами сообщений для покупки."""
     
     keyboard = []
     
@@ -211,7 +212,7 @@ async def show_message_packages(update: Update, context: ContextTypes.DEFAULT_TY
         callback_data = f"buy_msg_{key}" 
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
     
-    # Добавляем кнопку "Назад"
+    # Добавляем кнопку Назад
     keyboard.append([InlineKeyboardButton("⬅️ Назад к статусу", callback_data="back_to_status")])
         
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -221,7 +222,7 @@ async def show_message_packages(update: Update, context: ContextTypes.DEFAULT_TY
         "Купленные сообщения суммируются с Вашим дневным лимитом и действуют бессрочно."
     )
     
-    # Определяем, как отправить/отредактировать сообщение
+    # Отправляем или редактируем сообщение
     if update.message:
         await update.message.reply_text(message_text, reply_markup=reply_markup, parse_mode='Markdown')
     elif update.callback_query:
@@ -235,14 +236,45 @@ async def show_message_packages(update: Update, context: ContextTypes.DEFAULT_TY
 # ========================== ХЕНДЛЕРЫ КОМАНД ==========================
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Сбрасывает историю сообщений (память) пользователя."""
-    user_id = update.message.from_user.id
+    """Запрашивает подтверждение перед сбросом истории."""
+    keyboard = [
+        [InlineKeyboardButton("🗑️ Очистить историю навсегда", callback_data="confirm_reset_history")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_status")] # Добавлена кнопка Назад
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    warning_message = (
+        "⚠️ **Внимание! Вы собираетесь очистить память Алины. Это действие НЕОБРАТИМО.**\n\n"
+        "Это удалит всю историю вашего общения с Алиной, и она забудет все, о чем вы говорили. "
+        "Начать новый разговор с чистого листа?"
+    )
+    
+    await update.message.reply_text(
+        warning_message,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+
+async def confirm_reset_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сбрасывает историю сообщений (память) пользователя после подтверждения."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    # Сначала сбросим историю
     clear_user_history(user_id)
-    await update.message.reply_text("🧠 Память сброшена! Начнем наш разговор с чистого листа.")
+
+    # Редактируем сообщение, чтобы показать результат
+    await query.edit_message_text(
+        "✅ **Память сброшена!**\n\nНачнем наш разговор с чистого листа. "
+        "Попробуй отправить мне что-нибудь 😉", 
+        reply_markup=None,
+        parse_mode='Markdown'
+    )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Приветственное сообщение и отображение статуса подписки при /start или кнопке 'Назад'."""
+    """Приветственное сообщение и отображение статуса подписки."""
     
     source = None
     user_id = None
@@ -256,7 +288,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         return
     
-    # --- 1. Получаем статус ---
+    # Получаем статус
     days_left, messages_left = get_user_status(user_id) 
 
     welcome_message = (
@@ -276,7 +308,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Чтобы продолжить общение, Вы можете:\n"
         )
     
-    # --- 2. Создаем кнопки для покупки ---
+    # Создаем кнопки для покупки
     keyboard = [
         [InlineKeyboardButton(f"⭐ Купить безлимит ({SUBSCRIPTION_PRICE_STARS} ⭐/30 дней)", callback_data="show_sub_details")],
         
@@ -287,7 +319,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # --- 3. Отправляем или редактируем сообщение ---
+    # Отправляем или редактируем сообщение
     if source is update.message:
         await source.reply_text(
             welcome_message + status_text, 
@@ -303,7 +335,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатие кнопок (подписка / разовое пополнение / навигация)."""
+    """Обрабатывает нажатие кнопок."""
     query = update.callback_query
     await query.answer()
     
@@ -312,6 +344,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # НАВИГАЦИЯ (Кнопка Назад)
     if data == 'back_to_status':
         await start_command(update, context) 
+        return
+    
+    # ПОДТВЕРЖДЕНИЕ СБРОСА ПАМЯТИ
+    elif data == 'confirm_reset_history':
+        await confirm_reset_history(update, context)
         return
 
     # ДЕТАЛИЗАЦИЯ
@@ -396,6 +433,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_message(user_id, "assistant", ai_response)
 
 
+# ========================== ПЛАНИРОВЩИК ЗАДАЧ ==========================
+
+async def daily_cleanup(context):
+    """Ежедневная очистка старых сообщений."""
+    from db_manager import cleanup_all_old_messages
+    
+    deleted = cleanup_all_old_messages(days_to_keep=7)
+    print(f"✅ Ежедневная очистка завершена: удалено {deleted} сообщений")
+
+
 # ========================== MAIN ==========================
 
 def main():
@@ -409,7 +456,7 @@ def main():
     application.add_handler(CommandHandler("mysubsc", start_command))
     application.add_handler(CommandHandler("subscribe", show_subscription_details)) 
     application.add_handler(CommandHandler("buy_messages", show_message_packages))
-    application.add_handler(CommandHandler("reset", reset_command))
+    application.add_handler(CommandHandler("reset", reset_command)) # ИЗМЕНЕНИЕ: Теперь ведет на подтверждение
     
     # Сообщения
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -419,9 +466,15 @@ def main():
     application.add_handler(PreCheckoutQueryHandler(pre_checkout_callback))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     
+    # Запускаем ежедневную очистку в 3 утра
+    application.job_queue.run_daily(
+        daily_cleanup,
+        time=dt_time(hour=3, minute=0)
+    )
+    
     print("🚀 AIGirl bot is running...")
     
-    # Устанавливаем команды меню после запуска (с обработкой ошибок)
+    # Устанавливаем команды меню после запуска
     async def post_init(app):
         try:
             await set_bot_commands(app)
@@ -435,4 +488,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
