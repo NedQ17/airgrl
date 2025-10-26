@@ -170,31 +170,39 @@ def get_user_status(user_id):
 
 
 def get_connection():
-    """
-    Извлекает соединение из пула, ПРОВЕРЯЯ его на активность.
-    Если соединение неактивно (из-за тайм-аута сервера), 
-    оно закрывается и возвращается в пул, после чего берется новое.
-    """
-    conn = connection_pool.getconn()
-    
+    """Получает соединение из пула, проверяя, не устарело ли оно."""
+    global connection_pool
     try:
-        # Простейший способ проверить, живо ли соединение: 
-        # выполнить легкий, не изменяющий данные запрос (ROLLBACK)
-        conn.rollback() 
-        return conn
-        
-    except psycopg2.InterfaceError: 
-        # Если произошла InterfaceError, соединение мертво.
-        print("⚠️ Обнаружено неактивное соединение в пуле. Закрытие и получение нового.")
-        
-        # 1. Сначала возвращаем мертвое соединение в пул, принудительно его закрыв
-        connection_pool.putconn(conn, close=True)
-        
-        # 2. Получаем новое, свежее соединение
+        # 1. Попытка получить рабочее соединение
         conn = connection_pool.getconn()
-        
-        # 3. Возвращаем новое соединение
+        # 2. Проверяем его состояние (если оно долго висело)
+        conn.cursor().execute('SELECT 1') 
         return conn
+    except Exception as e:
+        # 3. Если ошибка (например, EOF detected), чистим пул и пробуем еще раз
+        print(f"⚠️ Ошибка соединения с БД ({e}). Очистка пула и переподключение...")
+        connection_pool.closeall() 
+
+        # 4. Повторная попытка (должна взять свежее соединение)
+        try:
+            conn = connection_pool.getconn()
+            conn.cursor().execute('SELECT 1') 
+            return conn
+        except Exception as e_retry:
+            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось восстановить соединение с БД: {e_retry}")
+            # Если и вторая попытка не удалась, выбрасываем ошибку выше
+            raise RuntimeError("Критическая ошибка базы данных.") from e_retry
+
+
+def return_connection(conn):
+    """Возвращает соединение в пул."""
+    if conn:
+        # Убедитесь, что conn.closed == 0, прежде чем возвращать
+        if not conn.closed:
+            connection_pool.putconn(conn)
+        else:
+            # Если соединение закрыто (например, после критической ошибки), просто выбрасываем
+            connection_pool.putconn(conn, close=True)
 
 def return_connection(conn):
     """Возвращает соединение в пул."""

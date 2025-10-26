@@ -1,5 +1,5 @@
 # config.py
-import os
+import os, base64
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -7,22 +7,22 @@ from datetime import datetime
 load_dotenv()
 
 # --- API Keys (Загружаются из .env) ---
-TOKEN_TG = os.getenv('TOKEN_TG')
-DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+TOKEN_TG = base64.b64decode(os.getenv('TOKEN_TG')).decode("utf-8")
+DEEPSEEK_API_KEY = base64.b64decode(os.getenv('DEEPSEEK_API_KEY')).decode("utf-8")
 PAYMENT_PROVIDER_TOKEN = os.getenv('PAYMENT_PROVIDER_TOKEN')
-ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY')
+ENCRYPTION_KEY = base64.b64decode(os.getenv('ENCRYPTION_KEY')).decode("utf-8")
 
 # --- ОБЯЗАТЕЛЬНАЯ ПОДПИСКА НА КАНАЛ ---
-CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME')
-CHANNEL_ID = int(os.getenv('CHANNEL_ID', '0')) if os.getenv('CHANNEL_ID') else None
+CHANNEL_USERNAME =base64.b64decode(os.getenv('CHANNEL_USERNAME')).decode("utf-8")
+CHANNEL_ID = int (base64.b64decode((os.getenv('CHANNEL_ID', '0'))).decode("utf-8")) if base64.b64decode(os.getenv('CHANNEL_ID')).decode("utf-8") else None
 
 # --- Database Configuration (Supabase PostgreSQL) ---
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST'),
-    'port': os.getenv('DB_PORT'),
-    'database': os.getenv('DB_NAME'),
-    'user': os.getenv('DB_USER'),
-    'password': os.getenv('DB_PASSWORD')
+    'host': base64.b64decode(os.getenv('DB_HOST')).decode("utf-8"),
+    'port': base64.b64decode(os.getenv('DB_PORT')).decode("utf-8"),
+    'database': base64.b64decode(os.getenv('DB_NAME')).decode("utf-8"),
+    'user': base64.b64decode(os.getenv('DB_USER')).decode("utf-8"),
+    'password': base64.b64decode(os.getenv('DB_PASSWORD')).decode("utf-8")
 }
 
 # --- Model Settings ---
